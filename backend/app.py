@@ -8,7 +8,11 @@ from flask_cors import CORS
 import json
 import os
 import logging
+import httpx
 from typing import Dict, Any
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from ai.csp_engine import CSPEngine
 from ai.genetic_optimizer import NSGA2Optimizer
@@ -19,21 +23,76 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), 'data', 'seed_data.json')
+# Supabase Configuration
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-def load_data() -> Dict[str, Any]:
-    """Load component data from JSON file"""
+supabase_headers = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+}
+
+# Cache for data to avoid hitting Supabase on every request
+_DATA_CACHE = None
+
+def fetch_supabase_data(table_name: str):
+    """Fetch all rows from a Supabase table using REST API"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.error("Supabase credentials missing! Check environment variables.")
+        return []
+        
+    url = f"{SUPABASE_URL}/rest/v1/{table_name}?select=*"
     try:
-        with open(DATA_PATH, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        logger.error(f"Data file not found: {DATA_PATH}")
-        return {"components": {}, "usage_profiles": {}, "budget_tiers": {}}
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing data file: {e}")
-        return {"components": {}, "usage_profiles": {}, "budget_tiers": {}}
+        response = httpx.get(url, headers=supabase_headers, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Error fetching from Supabase '{table_name}': {e}")
+        return []
 
-DATA = load_data()
+def get_data() -> Dict[str, Any]:
+    """Get component data from Supabase, with basic memory caching"""
+    global _DATA_CACHE
+    if _DATA_CACHE is not None:
+        return _DATA_CACHE
+        
+    logger.info("Fetching fresh data from Supabase DB...")
+    
+    components_raw = fetch_supabase_data("components")
+    usage_profiles_raw = fetch_supabase_data("usage_profiles")
+    budget_tiers_raw = fetch_supabase_data("budget_tiers")
+    
+    # Reconstruct the expected nested structure for the algorithm
+    structured_components = {
+        "cpus": [], "gpus": [], "motherboards": [], 
+        "ram": [], "storage": [], "psus": [], "cases": []
+    }
+    
+    for item in components_raw:
+        comp_type = item.get("type", "")
+        # The frontend/algorithm expects a flat dict of specs mixed with core columns
+        flat_item = item.get("specs", {})
+        flat_item.update({
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "brand": item.get("brand"),
+            "price": item.get("price"),
+            "performance_score": item.get("performance_score")
+        })
+        if comp_type in structured_components:
+            structured_components[comp_type].append(flat_item)
+            
+    # Reconstruct dictionary layouts
+    usage_profiles = {p["id"]: p for p in usage_profiles_raw}
+    budget_tiers = {b["id"]: b for b in budget_tiers_raw}
+    
+    _DATA_CACHE = {
+        "components": structured_components,
+        "usage_profiles": usage_profiles,
+        "budget_tiers": budget_tiers
+    }
+    return _DATA_CACHE
 
 
 @app.route('/api/health', methods=['GET'])
@@ -49,7 +108,7 @@ def health_check():
 @app.route('/api/usage-types', methods=['GET'])
 def get_usage_types():
     """Get available usage types/profiles"""
-    usage_profiles = DATA.get('usage_profiles', {})
+    usage_profiles = get_data().get('usage_profiles', {})
     
     profiles = []
     for key, profile in usage_profiles.items():
@@ -92,7 +151,7 @@ def _get_usage_icon(usage_type: str) -> str:
 @app.route('/api/budget-tiers', methods=['GET'])
 def get_budget_tiers():
     """Get budget tier information"""
-    budget_tiers = DATA.get('budget_tiers', {})
+    budget_tiers = get_data().get('budget_tiers', {})
     
     tiers = []
     for key, tier in budget_tiers.items():
@@ -117,7 +176,7 @@ def get_budget_tiers():
 @app.route('/api/components', methods=['GET'])
 def get_all_components():
     """Get all available components"""
-    components = DATA.get('components', {})
+    components = get_data().get('components', {})
     
     summary = {}
     for comp_type, items in components.items():
@@ -139,7 +198,7 @@ def get_all_components():
 @app.route('/api/components/<component_type>', methods=['GET'])
 def get_components_by_type(component_type: str):
     """Get components of a specific type"""
-    components = DATA.get('components', {})
+    components = get_data().get('components', {})
     
     type_mapping = {
         'cpu': 'cpus',
@@ -212,7 +271,7 @@ def get_recommendations():
                 "error": "Maximum budget is ₹5,00,000"
             }), 400
         
-        valid_usage_types = list(DATA.get('usage_profiles', {}).keys())
+        valid_usage_types = list(get_data().get('usage_profiles', {}).keys())
         if usage_type not in valid_usage_types:
             return jsonify({
                 "success": False,
@@ -228,7 +287,7 @@ def get_recommendations():
         
         logger.info(f"Generating recommendations: Budget=₹{budget:,}, Usage={usage_type}, CPU Brand={cpu_brand or 'Any'}")
         
-        csp_engine = CSPEngine(DATA['components'])
+        csp_engine = CSPEngine(get_data()['components'])
         compatible_components = csp_engine.get_compatible_components(budget, usage_type)
         
         # Filter by CPU brand preference if specified
@@ -278,7 +337,7 @@ def get_recommendations():
             compatible_components=compatible_components,
             target_budget=budget,
             usage_type=usage_type,
-            usage_profiles=DATA['usage_profiles'],
+            usage_profiles=get_data()['usage_profiles'],
             population_size=40,
             generations=60
         )
@@ -298,7 +357,7 @@ def get_recommendations():
             "request": {
                 "budget": budget,
                 "usage_type": usage_type,
-                "usage_name": DATA['usage_profiles'][usage_type]['name']
+                "usage_name": get_data()['usage_profiles'][usage_type]['name']
             },
             "recommendations": builds,
             "optimization_info": {
@@ -347,7 +406,7 @@ def get_alternatives():
         if not data_key:
             return jsonify({"success": False, "error": f"Invalid component type: {component_type}"}), 400
         
-        all_components = DATA.get('components', {}).get(data_key, [])
+        all_components = get_data().get('components', {}).get(data_key, [])
         current_component_id = None
         if component_type in current_build and current_build[component_type]:
             current_component_id = current_build[component_type].get('id')
@@ -364,7 +423,7 @@ def get_alternatives():
             test_build[component_type] = candidate
             
             # Run CSP validation
-            csp_engine = CSPEngine(DATA['components'])
+            csp_engine = CSPEngine(get_data()['components'])
             is_valid, issues = csp_engine.validate_build(test_build)
             
             if is_valid:
@@ -412,7 +471,7 @@ def validate_build():
         
         build = data['build']
         
-        csp_engine = CSPEngine(DATA['components'])
+        csp_engine = CSPEngine(get_data()['components'])
         is_valid, issues = csp_engine.validate_build(build)
         
         total_cost = sum(
@@ -444,6 +503,58 @@ def validate_build():
             "success": False,
             "error": f"Validation error: {str(e)}"
         }), 500
+
+
+@app.route('/api/prices/update-live', methods=['POST'])
+def update_live_price():
+    """
+    Endpoint for fetching and updating the live price of a specific component.
+    Expects JSON: { "component_id": "cpu_001" }
+    """
+    try:
+        data = request.get_json()
+        component_id = data.get('component_id')
+        
+        if not component_id:
+            return jsonify({"success": False, "error": "component_id required"}), 400
+            
+        # 1. "Scrape" or "Fetch" real-time pricing here.
+        # For demonstration purposes, we will simulate a real-time price fluctuation API
+        # In production this would use Beautiful Soup or a specific Vendor API (e.g. Amazon PA-API)
+        import random
+        # Simulate connecting to an external server and fetching a newer price calculation.
+        simulated_live_price = float(random.randint(5000, 80000))
+        
+        # 2. Update the specific row in Supabase via REST API
+        if not SUPABASE_URL or not SUPABASE_KEY:
+             return jsonify({"success": False, "error": "Supabase Connection Missing"}), 500
+        
+        url = f"{SUPABASE_URL}/rest/v1/components?id=eq.{component_id}"
+        payload = {"price": simulated_live_price}
+        
+        update_response = httpx.patch(url, headers=supabase_headers, json=payload, timeout=10.0)
+        update_response.raise_for_status()
+
+        # Invalidate the memory cache so the UI sees the new price
+        global _DATA_CACHE
+        _DATA_CACHE = None
+        
+        return jsonify({
+            "success": True,
+            "message": f"Successfully updated component {component_id} pricing.",
+            "new_price": simulated_live_price
+        })
+
+    except httpx.HTTPError as he:
+        logger.error(f"Live Price update Supabase Error: {he}")
+        return jsonify({"success": False, "error": f"Database mutation failed: {he}"}), 500
+    except Exception as e:
+        logger.error(f"Error fetching live prices: {str(e)}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "error": f"Internal server error: {str(e)}"
+        }), 500
+
 
 
 @app.errorhandler(404)
