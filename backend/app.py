@@ -14,6 +14,8 @@ from typing import Dict, Any
 from dotenv import load_dotenv
 load_dotenv()
 
+from bs4 import BeautifulSoup
+
 from ai.csp_engine import CSPEngine
 from ai.genetic_optimizer import NSGA2Optimizer
 
@@ -518,21 +520,66 @@ def update_live_price():
         if not component_id:
             return jsonify({"success": False, "error": "component_id required"}), 400
             
-        # 1. "Scrape" or "Fetch" real-time pricing here.
-        # For demonstration purposes, we will simulate a real-time price fluctuation API
-        # In production this would use Beautiful Soup or a specific Vendor API (e.g. Amazon PA-API)
-        import random
-        # Simulate connecting to an external server and fetching a newer price calculation.
-        simulated_live_price = float(random.randint(5000, 80000))
-        
-        # 2. Update the specific row in Supabase via REST API
+        # 1. Scraping from EliteHubs
+        logger.info(f"Looking up live price for core component: {component_id}")
         if not SUPABASE_URL or not SUPABASE_KEY:
              return jsonify({"success": False, "error": "Supabase Connection Missing"}), 500
+             
+        # Fetch the component name from the DB first to search EliteHubs
+        url_fetch = f"{SUPABASE_URL}/rest/v1/components?id=eq.{component_id}&select=name"
+        fetch_response = httpx.get(url_fetch, headers=supabase_headers, timeout=5.0)
+        fetch_response.raise_for_status()
+        rows = fetch_response.json()
         
-        url = f"{SUPABASE_URL}/rest/v1/components?id=eq.{component_id}"
-        payload = {"price": simulated_live_price}
+        if not rows:
+             return jsonify({"success": False, "error": "Component not found"}), 404
+             
+        component_name = rows[0].get('name')
         
-        update_response = httpx.patch(url, headers=supabase_headers, json=payload, timeout=10.0)
+        # Now Scrape EliteHubs
+        import urllib.parse
+        encoded_query = urllib.parse.quote(component_name)
+        elite_url = f"https://elitehubs.com/search?type=product&options%5Bprefix%5D=last&q={encoded_query}"
+        
+        scrape_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        scrape_response = httpx.get(elite_url, headers=scrape_headers, follow_redirects=True, timeout=10.0)
+        scrape_response.raise_for_status()
+        
+        soup = BeautifulSoup(scrape_response.text, 'html.parser')
+        
+        # Find first product card in the search template
+        grid_items = soup.select('.grid__item .card-wrapper')
+        if not grid_items:
+             logger.warning(f"EliteHubs returned no products for query: {component_name}")
+             return jsonify({"success": False, "error": "Live price not found on EliteHubs"}), 404
+             
+        first_product = grid_items[0]
+        
+        # Look for sale price, fallback to regular price
+        price_elem = first_product.select_one('.price-item--sale') or first_product.select_one('.price-item--regular')
+        if not price_elem:
+             return jsonify({"success": False, "error": "Price tag not found in product listing"}), 404
+             
+        # "Rs. 18,500.00" -> 18500.00
+        raw_price_str = price_elem.text.strip()
+        clean_price_str = "".join(c for c in raw_price_str if c.isdigit() or c == '.')
+        
+        live_price = 0.0
+        try:
+             live_price = float(clean_price_str)
+        except ValueError:
+             return jsonify({"success": False, "error": "Failed to parse scraped price text"}), 500
+
+        # 2. Update the specific row in Supabase via REST API
+        url_patch = f"{SUPABASE_URL}/rest/v1/components?id=eq.{component_id}"
+        payload = {"price": live_price}
+        
+        update_response = httpx.patch(url_patch, headers=supabase_headers, json=payload, timeout=5.0)
         update_response.raise_for_status()
 
         # Invalidate the memory cache so the UI sees the new price
@@ -541,8 +588,8 @@ def update_live_price():
         
         return jsonify({
             "success": True,
-            "message": f"Successfully updated component {component_id} pricing.",
-            "new_price": simulated_live_price
+            "message": f"Successfully scraped and updated {component_name} pricing from EliteHubs.",
+            "new_price": live_price
         })
 
     except httpx.HTTPError as he:
