@@ -373,7 +373,7 @@ const BuildCard = ({ build, index, onSwapComponent }) => {
   const [swapLoading, setSwapLoading] = useState(false);
   const rowsRef = useRef(null);
   const compOrder = ['cpu', 'gpu', 'motherboard', 'ram', 'storage', 'psu', 'case'];
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+  const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:5000');
 
   // GSAP staggered reveal on mount
   useEffect(() => {
@@ -582,7 +582,7 @@ const SmartWizard = () => {
   const [error, setError] = useState(null);
   const [results, setResults] = useState(null);
   const [optimizationInfo, setOptimizationInfo] = useState(null);
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+  const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:5000');
 
   const fetchRecommendations = async () => {
     setLoading(true); setError(null);
