@@ -1,5 +1,5 @@
 """
-Standalone script to scrape live prices from EliteHubs
+Standalone script to scrape live prices from EliteHubs (Shopify JSON API)
 and update them directly in the Supabase database.
 
 Run this whenever you want to refresh all component prices:
@@ -10,7 +10,6 @@ import httpx
 import urllib.parse
 import os
 import time
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,43 +23,34 @@ supabase_headers = {
     "Content-Type": "application/json"
 }
 
-scrape_headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-}
-
 
 def scrape_price(component_name):
-    """Scrape the price for a single component from EliteHubs."""
+    """Scrape price via EliteHubs Shopify Suggest JSON API (no JS rendering needed)."""
     encoded = urllib.parse.quote(component_name)
-    url = f"https://elitehubs.com/search?type=product&options%5Bprefix%5D=last&q={encoded}"
+    url = f"https://elitehubs.com/search/suggest.json?q={encoded}&resources[type]=product&resources[limit]=1"
     
     try:
-        response = httpx.get(url, headers=scrape_headers, follow_redirects=True, timeout=10.0)
+        response = httpx.get(url, headers={'User-Agent': 'Mozilla/5.0'}, follow_redirects=True, timeout=10.0)
         response.raise_for_status()
+        data = response.json()
     except Exception as e:
         print(f"  ✗ Network error: {e}")
         return None
-        
-    soup = BeautifulSoup(response.text, 'html.parser')
-    products = soup.select('.grid__item .card-wrapper')
+    
+    products = data.get('resources', {}).get('results', {}).get('products', [])
     
     if not products:
         return None
-        
-    first_product = products[0]
-    price_elem = first_product.select_one('.price-item--sale') or first_product.select_one('.price-item--regular')
     
-    if not price_elem:
+    price_str = products[0].get('price', '')
+    
+    if not price_str:
         return None
-        
-    raw_price = price_elem.text.strip()
-    clean_price = "".join(c for c in raw_price if c.isdigit() or c == '.')
     
     try:
-        return float(clean_price)
-    except ValueError:
+        price = float(price_str)
+        return price if price > 0 else None
+    except (ValueError, TypeError):
         return None
 
 
@@ -89,7 +79,6 @@ def main():
     print(f"Found {len(components)} components.\n")
     
     updated = 0
-    failed = 0
     skipped = 0
     
     for i, comp in enumerate(components):
@@ -97,7 +86,7 @@ def main():
         comp_name = comp['name']
         old_price = comp.get('price', 0)
         
-        print(f"[{i+1}/{len(components)}] {comp_name}...")
+        print(f"[{i+1}/{len(components)}] {comp_name}...", end=" ")
         
         live_price = scrape_price(comp_name)
         
@@ -105,17 +94,17 @@ def main():
             update_price_in_db(comp_id, live_price)
             change = live_price - old_price
             symbol = "+" if change >= 0 else ""
-            print(f"  ✓ ₹{old_price:,.0f} → ₹{live_price:,.0f} ({symbol}{change:,.0f})")
+            print(f"✓ ₹{old_price:,.0f} → ₹{live_price:,.0f} ({symbol}{change:,.0f})")
             updated += 1
         else:
-            print(f"  – Skipped (no price found on EliteHubs)")
+            print(f"– Skipped (not found)")
             skipped += 1
         
-        # Be nice to the server — wait 1 second between requests
-        time.sleep(1)
+        # Be nice to the server — small delay between requests
+        time.sleep(0.5)
     
     print(f"\n{'='*50}")
-    print(f"Done! Updated: {updated}  |  Skipped: {skipped}  |  Failed: {failed}")
+    print(f"Done! Updated: {updated}  |  Skipped (not on EliteHubs): {skipped}")
     print(f"{'='*50}")
 
 
