@@ -485,11 +485,10 @@ const LoadingStep = () => {
 };
 
 // ─── Build Card (Airy List Rows with GSAP) ───────────────────
-const BuildCard = ({ build, index, onSwapComponent, onUpdatePrice }) => {
+const BuildCard = ({ build, index, onSwapComponent }) => {
   const [swapType, setSwapType] = useState(null);
   const [alternatives, setAlternatives] = useState([]);
   const [swapLoading, setSwapLoading] = useState(false);
-  const [priceLoading, setPriceLoading] = useState(null);
   const rowsRef = useRef(null);
   const compOrder = ['cpu', 'gpu', 'motherboard', 'ram', 'storage', 'psu', 'case'];
   const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:5000');
@@ -514,17 +513,7 @@ const BuildCard = ({ build, index, onSwapComponent, onUpdatePrice }) => {
     } catch (e) { console.error(e); } finally { setSwapLoading(false); }
   };
 
-  const checkLivePrice = async (ct, compId) => {
-    if (!compId) return;
-    setPriceLoading(ct);
-    try {
-      const r = await fetch(`${API_URL}/api/prices/update-live`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ component_id: compId }) });
-      const d = await r.json();
-      if (d.success && d.new_price) {
-        if (onUpdatePrice) onUpdatePrice(index, ct, d.new_price);
-      }
-    } catch (e) { console.error(e); } finally { setPriceLoading(null); }
-  };
+
 
   const selectAlt = (ct, comp) => { onSwapComponent(index, ct, comp); setSwapType(null); setAlternatives([]); };
   const cpuTdp = build.components.cpu?.tdp || 0;
@@ -581,11 +570,6 @@ const BuildCard = ({ build, index, onSwapComponent, onUpdatePrice }) => {
                 <div className="text-sm font-bold mr-6 flex-shrink-0" style={{ color: '#1D1D1F' }}>{formatPrice(comp.price)}</div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <div className="dot-ok mr-2" />
-                  <button onClick={() => checkLivePrice(ct, comp.id)} disabled={priceLoading === ct} className="flex items-center gap-1 text-[11px] font-medium transition-colors px-2 py-1 rounded-md"
-                    style={{ color: priceLoading === ct ? '#86868B' : (isSwapping ? '#86868B' : '#0071E3'), background: 'rgba(0,113,227,0.05)' }}>
-                    {priceLoading === ct ? <div className="w-3 h-3 rounded-full animate-spin" style={{ border: '1.5px solid #E8E8ED', borderTopColor: '#0071E3' }} /> : <Icons.refresh />}
-                    Live
-                  </button>
                   <button onClick={() => fetchAlts(ct)} className="text-[11px] font-medium transition-colors px-2 py-1 rounded-md"
                     style={{ color: isSwapping ? '#fff' : '#86868B', background: isSwapping ? '#0071E3' : '#F5F5F7' }}>
                     Swap
@@ -660,17 +644,7 @@ const ResultsStep = ({ builds: initialBuilds, budget, usageType, onReset, optimi
     setIsCustomized(true);
   };
 
-  const handleUpdatePrice = (bi, ct, newPrice) => {
-    setBuilds(prev => {
-      const u = [...prev]; const b = { ...u[bi] };
-      const oldComp = b.components[ct];
-      b.components = { ...b.components, [ct]: { ...oldComp, price: newPrice } };
-      b.total_cost = Object.values(b.components).filter(Boolean).reduce((s, c) => s + (c.price || 0), 0);
-      b.budget_utilization = Math.round((b.total_cost / budget) * 1000) / 10;
-      u[bi] = b; return u;
-    });
-    setIsCustomized(true);
-  };
+
 
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={ease} className="space-y-6">
@@ -690,7 +664,7 @@ const ResultsStep = ({ builds: initialBuilds, budget, usageType, onReset, optimi
       )}
 
       <div className="space-y-5">
-        {builds.map((b, i) => <BuildCard key={i} build={b} index={i} onSwapComponent={handleSwap} onUpdatePrice={handleUpdatePrice} />)}
+        {builds.map((b, i) => <BuildCard key={i} build={b} index={i} onSwapComponent={handleSwap} />)}
       </div>
 
       <div className="text-center pt-4 flex justify-center gap-3">
